@@ -10,6 +10,17 @@ Supabase project: `fanjxckcjfghvxsubwey`
 
 ## ทำไปแล้ว
 
+### สัปดาห์ 3 — Backtest Engine (rule-based, ไม่ใช้ AI)
+- `src/backtest/engine.py` — จำลองเทรดย้อนหลังด้วย rule-based strategy ล้วน (ไม่มี AI) ตาม §9 สัปดาห์ 3
+- กันชี้ look-ahead bias ตาม §10.1: ที่ step i ใช้ข้อมูลแค่ `candles[:i+1]` เท่านั้น (ปลอดภัยเพราะ indicator ทุกตัวเป็น backward-looking rolling/EWM คำนวณครั้งเดียวพอ)
+- หักค่าฟี+slippage ทุกไม้ตาม §3/§10.4 (0.15% ต่อขา ผ่าน "effective price" เหมือนที่ sandbox ใช้)
+- Risk management ตาม §3: max 3 positions พร้อมกัน, 20% ของ equity ต่อไม้, SL 3%, TP 6%
+- Direction ต่อกฎ: เพิ่ม field `direction` (UP/DOWN) ให้ทุกกฎใน `src/scanner/rules.py`, รวมเป็น net direction ใน `src/scanner/confluence.py::net_direction()` — ใช้เฉพาะ backtest (AI decision layer ตัดสินใจเองจาก trigger list ไม่ยุ่งกับ field นี้)
+- คำนวณ metrics ครบตาม §7.3: Win Rate, Profit Factor, Max Drawdown, Sharpe Ratio, Avg Win/Loss
+- เปรียบเทียบ timeframe 1H vs 4H หลังหักค่าฟีตาม §10.7 (`--compare-timeframes`)
+- บันทึกผลลง Supabase จริง (`portfolios` mode=`backtest`, `trades`, `equity_snapshots`) ด้วย `--persist`
+- **ผลรันจริง (BTC+ETH+XRP+SOL+BNB, 3 ปี):** กลยุทธ์นี้ **ขาดทุน** ทั้งคู่ — 4H: -20.9% (win rate 34.9%, Sharpe -0.34), 1H: -71.8% (win rate 30.7%, Sharpe -1.76) เห็นชัดว่า 1H เทรดถี่เกินจนค่าฟีกินหมด ตรงกับคำเตือนใน §10.4 พอดี — **นี่คือผลลัพธ์ที่ถูกต้องของเครื่องมือนี้**: มันพิสูจน์ว่ากลยุทธ์พื้นฐานตามกฎ A1-E3 เฉยๆ (ยังไม่ผ่าน AI, ยังไม่ tune) ใช้ไม่ได้ ตรงตาม §12 "คุณค่าหลักคือการพิสูจน์ว่ากลยุทธ์ใช้ไม่ได้"
+
 ### สัปดาห์ 1 — Schema + Backfill
 - สร้างตาราง Supabase ครบ 11 ตารางตาม §4 (`db/migrations/0001_init.sql`)
 - Backfill ราคาย้อนหลัง 3 ปี: BTC/ETH/XRP/SOL/BNB × timeframe 1h + 4h = 164,250 แท่งเทียน (`src/data/backfill.py`)
@@ -56,11 +67,10 @@ Supabase project: `fanjxckcjfghvxsubwey`
 
 ### ระบบที่ยังไม่มีเลย
 - **Portfolio/Position/Trade execution จริง** (§9 สัปดาห์ 6) — ตาราง `portfolios`, `positions`, `trades`, `equity_snapshots` มีแต่ยังไม่ถูกใช้งานจริง (มีแค่ portfolio หลอกสำหรับผูก ai_score)
-- **risk_monitor job** (เช็ค SL/TP ทุก 1 นาที, §8) — ไม่มีความหมายถ้าไม่มี position จริง
-- **daily_snapshot job** — ไม่มีความหมายถ้าไม่มี portfolio จริง
-- **Backtest engine** (§9 สัปดาห์ 3) — ยังไม่เริ่มเลย ทั้งที่ spec บอกให้ทำ rule-based backtest ก่อนต่อ AI
-- **Walk-forward validation / parameter tuning** (§10.3, §10.6) — ยังไม่เริ่ม เพราะยังไม่มี backtest engine
-- **Look-ahead bias guard** — ยังไม่เกี่ยวข้องเพราะยังไม่มี backtest
+- **risk_monitor job** (เช็ค SL/TP ทุก 1 นาที, §8) — ไม่มีความหมายถ้าไม่มี position จริง (backtest engine มี SL/TP ในตัวอยู่แล้ว แต่นั่นคือจำลอง ไม่ใช่ live)
+- **daily_snapshot job** — ไม่มีความหมายถ้าไม่มี portfolio จริง (backtest engine เขียน equity_snapshots ของตัวเองตอนรันเสร็จ ไม่ใช่ job ที่รันทุกวันจริง)
+- **Walk-forward validation แบบเป็นระบบ** (§10.3) — เครื่องมือรองรับแล้ว (`--start`/`--end`) แต่ยังไม่ได้ลองแบ่งช่วง train/test จริงจัง หรือ tune น้ำหนักกฎ/threshold ตามผล
+- **1D timeframe comparison** (§10.7 อยากได้ 1H/4H/1D) — ตอนนี้เทียบแค่ 1H/4H เพราะเก็บแค่ 2 timeframe นี้ใน DB จริง
 
 ### ความเบี่ยงเบนจากสเปกที่ควรรู้ไว้
 - ใช้ **OpenRouter** แทน Anthropic API ตรง (Anthropic key ที่ให้มามี credit ไม่พอ) — ถ้าจะเปลี่ยนกลับ แก้ที่ `src/ai/claude_client.py`
@@ -71,8 +81,9 @@ Supabase project: `fanjxckcjfghvxsubwey`
 
 ## ลำดับที่แนะนำถ้าจะทำต่อ
 
-1. **Backtest engine** — ควรทำก่อนอย่างอื่น เพราะ spec เน้นว่าต้อง validate กลยุทธ์ด้วยข้อมูลย้อนหลังก่อนเชื่อผล live (ตอนนี้มีข้อมูล 3 ปีพร้อมอยู่แล้ว ไม่ต้องรอ)
+1. **แก้กลยุทธ์แล้ว backtest ใหม่** — ผลตอนนี้ขาดทุนทั้ง 1H/4H (ดูด้านบน) อย่าปล่อยให้ AI ตัดสินใจ live ต่อจนกว่าจะเจอชุดกฎ/threshold ที่ backtest แล้วกำไรจริง (นี่คือเงื่อนไขก่อนใช้เงินจริงตาม §9 อยู่แล้ว)
 2. **fetch_context job** (funding rate + Fear & Greed) — ปลดล็อก E1/E2 ให้ confluence score แม่นขึ้น
 3. **Portfolio/execution จริง** — ถ้าอยากให้ AI "เทรด" จริงๆ ไม่ใช่แค่ทำนายเฉยๆ
 4. A4/D2 rules — เสริมความแม่นยำของ scanner
 5. Kill switch + no-trade window — ต้องรอข้อ 3 (มีพอร์ตจริง) และปฏิทินข่าวก่อน
+6. เอาผล backtest ไปโชว์บน dashboard — ตอนนี้ผลอยู่ใน Supabase (`portfolios` mode=`backtest`) เฉยๆ ยังไม่ได้ขึ้นหน้าเว็บ
