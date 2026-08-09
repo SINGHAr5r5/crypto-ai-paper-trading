@@ -1,6 +1,9 @@
 """Builds docs/index.html — a static snapshot dashboard of the paper-trading
-pipeline's current state (pipeline status, per-symbol price/indicators, BTCUSDT
-chart). Pulls fresh data from Supabase every run; fonts are pre-baked into
+pipeline's current state: pipeline status, per-symbol price/indicators, and a
+switchable candlestick chart (5 symbols x 1h/4h) with an EMA/BB/Volume toggle
+and a client-side (localStorage-only) trading sandbox.
+
+Pulls fresh data from Supabase every run; fonts are pre-baked into
 web/template.html as base64 (see web/fonts/*.b64, sourced from Google Fonts).
 
 Usage:
@@ -9,6 +12,7 @@ Usage:
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,9 +22,8 @@ from src.data.supabase_client import run_sql
 WEB_DIR = Path(__file__).resolve().parent
 REPO_ROOT = WEB_DIR.parent
 SYMBOLS_ORDER = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
-MAIN_CHART_SYMBOL = "BTCUSDT"
-MAIN_CHART_CANDLES = 90
-SPARKLINE_DAYS = 10
+TIMEFRAMES = ["4h", "1h"]
+CANDLES_PER_TIMEFRAME = 180
 
 
 def fetch_latest_snapshot():
@@ -48,30 +51,28 @@ def fetch_24h_ago_closes():
     return {r["symbol"]: float(r["close_24h_ago"]) for r in rows}
 
 
-def fetch_main_chart_candles(symbol: str, limit: int):
+def fetch_candles(symbol: str, timeframe: str, limit: int):
     rows = run_sql(f"""
-        select o.open_time, o.open, o.high, o.low, o.close, i.ema20, i.ema50, i.rsi14
+        select o.open_time, o.open, o.high, o.low, o.close, o.volume,
+          i.ema20, i.ema50, i.ema200, i.bb_upper, i.bb_mid, i.bb_lower, i.rsi14
         from ohlcv o
         left join indicators i on i.symbol=o.symbol and i.timeframe=o.timeframe and i.open_time=o.open_time
-        where o.symbol = '{symbol}' and o.timeframe = '4h'
+        where o.symbol = '{symbol}' and o.timeframe = '{timeframe}'
         order by o.open_time desc
         limit {limit};
     """)
-    return list(reversed(rows))
+    rows = list(reversed(rows))
 
+    def f(v):
+        return float(v) if v is not None else None
 
-def fetch_sparklines(symbols: list[str], days: int):
-    symbols_sql = ", ".join(f"'{s}'" for s in symbols)
-    rows = run_sql(f"""
-        select symbol, open_time, close from ohlcv
-        where symbol in ({symbols_sql}) and timeframe='4h'
-        and open_time > now() - interval '{days} days'
-        order by symbol, open_time;
-    """)
-    out: dict[str, list[float]] = {}
-    for r in rows:
-        out.setdefault(r["symbol"], []).append(float(r["close"]))
-    return out
+    return [{
+        "t": r["open_time"],
+        "o": f(r["open"]), "h": f(r["high"]), "l": f(r["low"]), "c": f(r["close"]), "v": f(r["volume"]),
+        "ema20": f(r["ema20"]), "ema50": f(r["ema50"]), "ema200": f(r["ema200"]),
+        "bb_upper": f(r["bb_upper"]), "bb_mid": f(r["bb_mid"]), "bb_lower": f(r["bb_lower"]),
+        "rsi14": f(r["rsi14"]),
+    } for r in rows]
 
 
 def fetch_pipeline_status():
@@ -101,27 +102,18 @@ def build_data():
             "change_pct": change_pct,
             "rsi14": float(row["rsi14"]) if row["rsi14"] is not None else None,
             "macd_hist": float(row["macd_hist"]) if row["macd_hist"] is not None else None,
-            "ema20": float(row["ema20"]) if row["ema20"] is not None else None,
-            "ema50": float(row["ema50"]) if row["ema50"] is not None else None,
-            "ema200": float(row["ema200"]) if row["ema200"] is not None else None,
             "atr14": float(row["atr14"]) if row["atr14"] is not None else None,
             "bb_width": float(row["bb_width"]) if row["bb_width"] is not None else None,
         })
 
-    main_rows = fetch_main_chart_candles(MAIN_CHART_SYMBOL, MAIN_CHART_CANDLES)
-    btc_candles = [{
-        "t": r["open_time"],
-        "o": float(r["open"]), "h": float(r["high"]), "l": float(r["low"]), "c": float(r["close"]),
-        "ema20": float(r["ema20"]) if r["ema20"] is not None else None,
-        "ema50": float(r["ema50"]) if r["ema50"] is not None else None,
-        "rsi14": float(r["rsi14"]) if r["rsi14"] is not None else None,
-    } for r in main_rows]
-
-    other_symbols = [s for s in SYMBOLS_ORDER if s != MAIN_CHART_SYMBOL]
-    sparklines = fetch_sparklines(other_symbols, SPARKLINE_DAYS)
+    candles = {}
+    for sym in SYMBOLS_ORDER:
+        candles[sym] = {}
+        for tf in TIMEFRAMES:
+            print(f"  fetching {sym} {tf}...")
+            candles[sym][tf] = fetch_candles(sym, tf, CANDLES_PER_TIMEFRAME)
 
     status = fetch_pipeline_status()
-    from datetime import datetime, timezone
     pipeline = {
         "ohlcv_rows": status["ohlcv"]["c"],
         "indicator_rows": status["indicators"]["c"],
@@ -134,29 +126,10 @@ def build_data():
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "symbols": symbols_out,
-        "btc_candles": btc_candles,
-        "sparklines": sparklines,
+        "candles": candles,
         "pipeline": pipeline,
+        "fees": {"taker_fee_pct": 0.10, "slippage_pct": 0.05},
     }
-
-
-def render_candle_table_rows(candles: list[dict]) -> str:
-    rows = []
-    for c in candles[-20:]:
-        def fp(v):
-            if v is None:
-                return "—"
-            dp = 4 if v < 10 else 2
-            return f"{v:,.{dp}f}"
-        rsi = f"{c['rsi14']:.1f}" if c["rsi14"] is not None else "—"
-        rows.append(
-            f"<tr><td>{c['t'][:16].replace('T', ' ')}</td>"
-            f"<td class='mono'>{fp(c['o'])}</td><td class='mono'>{fp(c['h'])}</td>"
-            f"<td class='mono'>{fp(c['l'])}</td><td class='mono'>{fp(c['c'])}</td>"
-            f"<td class='mono'>{fp(c['ema20'])}</td><td class='mono'>{fp(c['ema50'])}</td>"
-            f"<td class='mono'>{rsi}</td></tr>"
-        )
-    return "\n".join(reversed(rows))
 
 
 def main():
@@ -176,7 +149,6 @@ def main():
     html = html.replace("__FONT_SANSCOND_600__", fonts["sanscond600"])
     html = html.replace("__FONT_SANSCOND_700__", fonts["sanscond700"])
     html = html.replace("__GENERATED_AT__", data["generated_at"])
-    html = html.replace("__CANDLE_TABLE_ROWS__", render_candle_table_rows(data["btc_candles"]))
     html = html.replace("__DASHBOARD_DATA__", json.dumps(data))
 
     docs_dir = REPO_ROOT / "docs"
