@@ -1,10 +1,16 @@
-"""Thin client for Binance's public REST klines endpoint (no API key needed)."""
+"""Thin client for Binance's public REST klines endpoint (no API key needed).
+
+Uses data-api.binance.vision (Binance's public market-data mirror) instead of
+api.binance.com: the main domain returns HTTP 451 for US-region IPs, which is
+where GitHub Actions' hosted runners live — the vision mirror serves the same
+market data without that geo-restriction.
+"""
 
 import time
 
 import requests
 
-BASE_URL = "https://api.binance.com/api/v3/klines"
+BASE_URL = "https://data-api.binance.vision/api/v3/klines"
 MAX_LIMIT = 1000
 
 KLINE_COLUMNS = [
