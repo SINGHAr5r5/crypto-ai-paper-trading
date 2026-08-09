@@ -1,4 +1,4 @@
-name: Rebuild dashboard
+name: Pipeline
 
 on:
   schedule:
@@ -9,12 +9,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: rebuild-dashboard
-  cancel-in-progress: true
+  group: pipeline
+  cancel-in-progress: false
 
 jobs:
-  rebuild:
+  run:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +24,18 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests pandas
+
+      - name: Scan + AI decision (§5-6)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python -m src.jobs.scan_and_decide
+
+      - name: Evaluate matured predictions (§7)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: python -m src.scoring.evaluator
 
       - name: Build dashboard
         env:

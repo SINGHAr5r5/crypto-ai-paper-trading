@@ -84,6 +84,57 @@ def fetch_pipeline_status():
     return {r["t"]: r for r in rows}
 
 
+def fetch_ai_totals():
+    rows = run_sql("""
+        select
+          (select count(*) from triggers) as total_triggers,
+          (select count(*) from predictions) as total_predictions;
+    """)
+    return rows[0]
+
+
+def fetch_ai_score():
+    rows = run_sql("select score, wrong_streak, total_correct, total_wrong, date from ai_score order by date desc limit 1;")
+    if not rows:
+        return {"score": 0, "wrong_streak": 0, "total_correct": 0, "total_wrong": 0, "date": None}
+    return rows[0]
+
+
+def fetch_recent_predictions(limit: int = 20):
+    rows = run_sql(f"""
+        select p.id, p.symbol, p.ts, p.direction, p.confidence, p.entry_price,
+               p.reasoning, p.horizon_hours,
+               pr.actual_change_pct, pr.is_correct, pr.evaluated_at
+        from predictions p
+        left join prediction_results pr on pr.prediction_id = p.id
+        order by p.ts desc
+        limit {limit};
+    """)
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"], "symbol": r["symbol"], "ts": r["ts"],
+            "direction": r["direction"], "confidence": float(r["confidence"]),
+            "entry_price": float(r["entry_price"]) if r["entry_price"] is not None else None,
+            "reasoning": r["reasoning"], "horizon_hours": r["horizon_hours"],
+            "actual_change_pct": float(r["actual_change_pct"]) if r["actual_change_pct"] is not None else None,
+            "is_correct": r["is_correct"],
+        })
+    return out
+
+
+def fetch_recent_triggers(limit: int = 30):
+    rows = run_sql(f"""
+        select symbol, triggered_at, confluence_score, passed_gate, called_ai, gate_reason
+        from triggers order by triggered_at desc limit {limit};
+    """)
+    return [{
+        "symbol": r["symbol"], "triggered_at": r["triggered_at"],
+        "confluence_score": r["confluence_score"], "passed_gate": r["passed_gate"],
+        "called_ai": r["called_ai"], "gate_reason": r["gate_reason"],
+    } for r in rows]
+
+
 def build_data():
     latest = fetch_latest_snapshot()
     prev_closes = fetch_24h_ago_closes()
@@ -114,6 +165,14 @@ def build_data():
             candles[sym][tf] = fetch_candles(sym, tf, CANDLES_PER_TIMEFRAME)
 
     status = fetch_pipeline_status()
+    ai_score = fetch_ai_score()
+    ai_totals = fetch_ai_totals()
+    predictions = fetch_recent_predictions()
+    triggers = fetch_recent_triggers()
+
+    evaluated = [p for p in predictions if p["is_correct"] is not None]
+    win_rate = round(sum(1 for p in evaluated if p["is_correct"]) / len(evaluated), 3) if evaluated else None
+
     pipeline = {
         "ohlcv_rows": status["ohlcv"]["c"],
         "indicator_rows": status["indicators"]["c"],
@@ -123,12 +182,26 @@ def build_data():
         "timeframes": ["1h", "4h"],
     }
 
+    now = datetime.now(timezone.utc)
     return {
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "generated_at": now.strftime("%Y-%m-%d %H:%M UTC"),
+        "generated_at_iso": now.isoformat(),
+        "refresh_interval_min": 15,
         "symbols": symbols_out,
         "candles": candles,
         "pipeline": pipeline,
         "fees": {"taker_fee_pct": 0.10, "slippage_pct": 0.05},
+        "ai": {
+            "score": ai_score["score"],
+            "wrong_streak": ai_score["wrong_streak"],
+            "total_correct": ai_score["total_correct"],
+            "total_wrong": ai_score["total_wrong"],
+            "win_rate": win_rate,
+            "total_triggers": ai_totals["total_triggers"],
+            "total_predictions": ai_totals["total_predictions"],
+            "predictions": predictions,
+            "triggers": triggers,
+        },
     }
 
 

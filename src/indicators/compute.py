@@ -86,13 +86,18 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def fetch_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame:
+def fetch_ohlcv(symbol: str, timeframe: str, recent: int | None = None) -> pd.DataFrame:
+    order = "DESC" if recent else "ASC"
+    limit_sql = f"LIMIT {recent}" if recent else ""
     rows = run_sql(f"""
         SELECT open_time, open, high, low, close, volume
         FROM ohlcv
         WHERE symbol = '{symbol}' AND timeframe = '{timeframe}'
-        ORDER BY open_time;
+        ORDER BY open_time {order}
+        {limit_sql};
     """)
+    if recent:
+        rows = list(reversed(rows))
     df = pd.DataFrame(rows)
     df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
     for col in ["open", "high", "low", "close", "volume"]:
@@ -137,13 +142,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
     parser.add_argument("--timeframes", nargs="+", default=DEFAULT_TIMEFRAMES)
+    parser.add_argument("--recent", type=int, default=None,
+                         help="Only recompute over the last N candles (EMA/RSI/ATR converge within ~500 bars) "
+                              "instead of full history — for fast incremental scheduled runs.")
     args = parser.parse_args()
 
     grand_total = 0
     for symbol in args.symbols:
         for timeframe in args.timeframes:
             print(f"\n=== {symbol} {timeframe} ===")
-            candles = fetch_ohlcv(symbol, timeframe)
+            candles = fetch_ohlcv(symbol, timeframe, recent=args.recent)
             if candles.empty:
                 print("  no ohlcv rows found, skipping")
                 continue

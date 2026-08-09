@@ -369,11 +369,13 @@ footer a { color: var(--ink-muted); }
     <div>
       <p class="header-eyebrow">Crypto AI · Paper Trading System</p>
       <h1 class="header-title">System Monitor</h1>
-      <p class="header-sub">สถานะไปป์ไลน์จริง ณ ขณะนี้ — ดึงราคาจาก Binance, คำนวณ indicator, เก็บลง Supabase ยังไม่มีชั้นตัดสินใจ AI (ตามแผนสัปดาห์ 3–4 ใน spec)</p>
+      <p class="header-sub">สถานะไปป์ไลน์จริง ณ ขณะนี้ — ดึงราคาจาก Binance, คำนวณ indicator, สแกน trigger, ให้ AI ตัดสินใจ และให้คะแนนความแม่นยำอัตโนมัติทุก 15 นาที (ยังไม่มีการเปิดออเดอร์จริง — ดู §9 สัปดาห์ 6)</p>
     </div>
     <div class="header-meta">
       <div>Generated</div>
       <div class="mono">__GENERATED_AT__</div>
+      <div style="margin-top:6px">Next update</div>
+      <div class="mono" id="countdown">—</div>
     </div>
   </div>
 
@@ -385,6 +387,44 @@ footer a { color: var(--ink-muted); }
   <div>
     <p class="section-label">Symbols · 4H · คลิกการ์ดเพื่อดูกราฟ</p>
     <div class="symbol-grid" id="symbol-grid"></div>
+  </div>
+
+  <div class="panel" id="ai-panel">
+    <div class="panel-head">
+      <div class="panel-title">AI Decision &amp; Scoring <span class="mono">· §6-7</span></div>
+    </div>
+    <p class="panel-sub">Claude ตัดสินใจก็ต่อเมื่อ confluence score ≥ 4 (มี rate limit: cooldown 4 ชม./เหรียญ, สูงสุด 10 ครั้ง/วัน) ผลลัพธ์เป็นแค่การทำนาย (prediction) เพื่อวัดความแม่นยำ ไม่ได้เปิดออเดอร์จริง</p>
+
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">AI Score</div><div class="stat-value mono" id="ai-stat-score"></div></div>
+      <div class="stat-tile"><div class="stat-label">Win Rate</div><div class="stat-value mono" id="ai-stat-winrate"></div></div>
+      <div class="stat-tile"><div class="stat-label">Wrong Streak</div><div class="stat-value mono" id="ai-stat-streak"></div></div>
+      <div class="stat-tile"><div class="stat-label">Predictions (Correct/Wrong)</div><div class="stat-value mono" id="ai-stat-totals"></div></div>
+    </div>
+
+    <div class="sandbox-tables">
+      <div>
+        <p class="section-label">Recent Predictions</p>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>Time (UTC)</th><th>Symbol</th><th>Direction</th><th>Confidence</th><th>Result</th><th>Reasoning</th></tr></thead>
+            <tbody id="predictions-body"></tbody>
+          </table>
+        </div>
+        <p class="empty-note" id="predictions-empty" style="display:none">ยังไม่มี prediction — จะเกิดขึ้นเมื่อ confluence score ของเหรียญไหนถึง 4 ขึ้นไป</p>
+      </div>
+      <div>
+        <details>
+          <summary>Trigger log (ทุกครั้งที่ scanner ตรวจ ไม่ว่าจะผ่าน gate หรือไม่)</summary>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>Time (UTC)</th><th>Symbol</th><th>Confluence</th><th>Passed Gate</th><th>Called AI</th><th>Reason</th></tr></thead>
+              <tbody id="triggers-body"></tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+    </div>
   </div>
 
   <div class="panel" id="chart-panel">
@@ -539,24 +579,97 @@ window.__DATA__ = __DASHBOARD_DATA__;
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
   function baseTicker(sym) { return sym.replace('USDT', ''); }
 
+  /* ---------- countdown ---------- */
+  (function initCountdown() {
+    const el = document.getElementById('countdown');
+    const next = new Date(DATA.generated_at_iso).getTime() + DATA.refresh_interval_min * 60 * 1000;
+    let reloaded = false;
+    function tick() {
+      const remain = next - Date.now();
+      if (remain <= 0) {
+        el.textContent = 'กำลังอัปเดต…';
+        if (!reloaded && remain < -90 * 1000) {
+          reloaded = true;
+          location.reload();
+        }
+        return;
+      }
+      const mm = Math.floor(remain / 60000);
+      const ss = Math.floor((remain % 60000) / 1000);
+      el.textContent = mm + ':' + String(ss).padStart(2, '0');
+    }
+    tick();
+    setInterval(tick, 1000);
+  })();
+
   /* ---------- pipeline status strip ---------- */
   const strip = document.getElementById('pipeline-strip');
   const p = DATA.pipeline;
+  const ai = DATA.ai;
   [
     { name: 'ohlcv', value: p.ohlcv_rows, range: p.range_start + ' → ' + p.range_end, status: 'COMPLETE', kind: 'good' },
     { name: 'indicators', value: p.indicator_rows, range: '13 indicators × ' + p.symbols_count + ' symbols × ' + p.timeframes.join('/'), status: 'COMPLETE', kind: 'good' },
-    { name: 'rule scanner + AI decision', value: null, range: 'ตามแผน §9 สัปดาห์ 3–4', status: 'ยังไม่เริ่ม', kind: 'muted' },
-    { name: 'paper trades (real)', value: null, range: 'ตามแผน §9 สัปดาห์ 6', status: 'ยังไม่เริ่ม', kind: 'muted' },
+    {
+      name: 'rule scanner + AI decision',
+      value: ai.total_triggers,
+      range: ai.total_predictions + ' AI call' + (ai.total_predictions === 1 ? '' : 's') + ' · ทุก 15 นาที',
+      status: 'LIVE', kind: 'good',
+      unit: ' triggers',
+    },
+    { name: 'paper trades (real execution)', value: null, range: 'ตามแผน §9 สัปดาห์ 6 — ยังไม่เปิดออเดอร์จริง', status: 'ยังไม่เริ่ม', kind: 'muted' },
   ].forEach(c => {
     strip.appendChild(el('div', { class: 'status-card' }, [
       el('div', { class: 'status-card-head' }, [
         el('div', { class: 'status-card-name', text: c.name }),
         el('span', { class: 'pill pill-' + c.kind, text: c.status }),
       ]),
-      el('div', { class: 'status-card-value mono', text: c.value != null ? fmtCompact(c.value) + ' rows' : '—' }),
+      el('div', { class: 'status-card-value mono', text: c.value != null ? fmtCompact(c.value) + (c.unit || ' rows') : '—' }),
       el('div', { class: 'status-card-range', text: c.range }),
     ]));
   });
+
+  /* ---------- AI decision & scoring panel ---------- */
+  (function renderAiPanel() {
+    document.getElementById('ai-stat-score').textContent = ai.score;
+    document.getElementById('ai-stat-winrate').textContent = ai.win_rate != null ? (ai.win_rate * 100).toFixed(0) + '%' : '—';
+    const streakEl = document.getElementById('ai-stat-streak');
+    streakEl.textContent = ai.wrong_streak;
+    streakEl.className = 'stat-value mono' + (ai.wrong_streak > 0 ? ' change-down' : '');
+    document.getElementById('ai-stat-totals').textContent = ai.total_correct + ' / ' + ai.total_wrong;
+
+    const predBody = document.getElementById('predictions-body');
+    document.getElementById('predictions-empty').style.display = ai.predictions.length ? 'none' : '';
+    ai.predictions.forEach(p => {
+      let resultCell;
+      if (p.is_correct === null || p.is_correct === undefined) {
+        resultCell = el('span', { class: 'pill pill-muted', text: 'PENDING' });
+      } else if (p.is_correct) {
+        resultCell = el('span', { class: 'pill pill-good', text: 'CORRECT ' + (p.actual_change_pct >= 0 ? '+' : '') + p.actual_change_pct.toFixed(2) + '%' });
+      } else {
+        resultCell = el('span', { class: 'pill', style: 'background:var(--critical-bg);color:var(--critical)', text: 'WRONG ' + (p.actual_change_pct >= 0 ? '+' : '') + p.actual_change_pct.toFixed(2) + '%' });
+      }
+      predBody.appendChild(el('tr', {}, [
+        el('td', { text: p.ts.slice(0, 16).replace('T', ' ') }),
+        el('td', { class: 'sym', text: baseTicker(p.symbol) }),
+        el('td', { class: 'mono ' + (p.direction === 'UP' ? 'change-up' : p.direction === 'DOWN' ? 'change-down' : ''), text: p.direction }),
+        el('td', { class: 'mono', text: (p.confidence * 100).toFixed(0) + '%' }),
+        el('td', {}, [resultCell]),
+        el('td', { style: 'text-align:left;white-space:normal;max-width:340px;font-size:11px;color:var(--ink-muted)', text: p.reasoning || '—' }),
+      ]));
+    });
+
+    const trigBody = document.getElementById('triggers-body');
+    ai.triggers.forEach(t => {
+      trigBody.appendChild(el('tr', {}, [
+        el('td', { text: t.triggered_at.slice(0, 16).replace('T', ' ') }),
+        el('td', { class: 'sym', text: baseTicker(t.symbol) }),
+        el('td', { class: 'mono', text: t.confluence_score }),
+        el('td', { text: t.passed_gate ? '✓' : '—' }),
+        el('td', { text: t.called_ai ? '✓' : '—' }),
+        el('td', { style: 'text-align:left;white-space:normal;font-size:11px;color:var(--ink-muted)', text: t.gate_reason || '—' }),
+      ]));
+    });
+  })();
 
   /* ---------- symbol cards ---------- */
   const grid = document.getElementById('symbol-grid');
